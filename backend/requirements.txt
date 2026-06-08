@@ -5,3 +5,4 @@ websockets
 ultralytics
 opencv-python-headless
 Pillow
+mediapipe
