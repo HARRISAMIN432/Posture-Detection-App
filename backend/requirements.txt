@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+python-multipart
+websockets
+ultralytics
+opencv-python-headless
+Pillow
