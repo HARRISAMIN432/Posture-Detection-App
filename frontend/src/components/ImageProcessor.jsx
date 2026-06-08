@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Upload, Activity } from 'lucide-react';
+import { Upload, Activity, Award, AlertCircle, Info } from 'lucide-react';
 
 export default function ImageProcessor() {
   const [selectedFile, setSelectedFile] = useState(null);
@@ -44,6 +44,78 @@ export default function ImageProcessor() {
     }
   };
 
+  // Helper to parse confidence percentage and get comments
+  const getFeedback = (label, isGood) => {
+    if (!label || label === "No detection") {
+      return {
+        percentage: null,
+        title: "No Detection",
+        text: "We couldn't detect a clear posture profile. Please upload a clear side-view or full-body photo where your back and neck are visible.",
+        color: "var(--text-muted)",
+        icon: <Info size={24} />
+      };
+    }
+
+    const match = label.match(/(\d+)%/);
+    const pct = match ? parseInt(match[1]) : 70; // default to 70 if not parsed
+
+    if (isGood) {
+      if (pct >= 85) {
+        return {
+          percentage: pct,
+          title: "Excellent Alignment",
+          text: "Fantastic posture! Your spine and neck are in optimal alignment. Keep maintaining this neutral position to minimize muscular stress and fatigue.",
+          color: "#10b981",
+          icon: <Award size={24} color="#10b981" />
+        };
+      } else if (pct >= 70) {
+        return {
+          percentage: pct,
+          title: "Good Posture",
+          text: "Your alignment is generally good. Try to slightly pull your shoulders back and keep your head aligned over your spine to make it perfect.",
+          color: "#34d399",
+          icon: <Award size={24} color="#34d399" />
+        };
+      } else {
+        return {
+          percentage: pct,
+          title: "Fair Posture",
+          text: "You are currently in a good posture range, but sitting near the limit. Try stretching your neck muscles and sitting slightly more upright.",
+          color: "#60a5fa",
+          icon: <Info size={24} color="#60a5fa" />
+        };
+      }
+    } else {
+      if (pct >= 80) {
+        return {
+          percentage: pct,
+          title: "Severe Slouching",
+          text: "Critical poor posture detected. Your spine is heavily curved. Pull your shoulders back, raise your chest, and adjust your workspace screen to eye level immediately.",
+          color: "#ef4444",
+          icon: <AlertCircle size={24} color="#ef4444" />
+        };
+      } else if (pct >= 50) {
+        return {
+          percentage: pct,
+          title: "Moderate Slouching",
+          text: "Poor posture detected. You are leaning forward or hunching. Take a deep breath, sit all the way back in your chair, and keep your feet flat on the floor.",
+          color: "#f87171",
+          icon: <AlertCircle size={24} color="#f87171" />
+        };
+      } else {
+        return {
+          percentage: pct,
+          title: "Mild Poor Posture",
+          text: "Slight deviation from correct posture. A quick posture check and reset will help prevent muscle tension from building up.",
+          color: "#fb923c",
+          icon: <Info size={24} color="#fb923c" />
+        };
+      }
+    }
+  };
+
+  const feedback = result ? getFeedback(result.label, result.is_good) : null;
+
   return (
     <div>
       <div 
@@ -63,21 +135,53 @@ export default function ImageProcessor() {
       </div>
 
       {previewUrl && (
-        <div style={{ marginTop: '2rem', textAlign: 'center' }}>
-          <div className="preview-container">
-            <img src={result?.image || previewUrl} alt="Preview" />
-          </div>
-          
-          <div style={{ marginTop: '1.5rem' }}>
-            <button className="btn" onClick={processImage} disabled={loading}>
-              <Activity size={18} className={loading ? 'loading' : ''} />
-              {loading ? 'Processing...' : 'Analyze Posture'}
-            </button>
-          </div>
+        <div style={{ marginTop: '2rem' }}>
+          {!result ? (
+            <div style={{ textAlign: 'center' }}>
+              <div className="preview-container-square" style={{ maxWidth: '400px', margin: '0 auto' }}>
+                <img src={previewUrl} alt="Preview" />
+              </div>
+              <div style={{ marginTop: '1.5rem' }}>
+                <button className="btn" onClick={processImage} disabled={loading}>
+                  <Activity size={18} className={loading ? 'loading' : ''} />
+                  {loading ? 'Processing...' : 'Analyze Posture'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="image-analysis-layout">
+              <div className="analysis-left">
+                <div className="preview-container-square">
+                  <img src={result.image} alt="Analyzed Result" />
+                </div>
+              </div>
+              
+              <div className="analysis-right">
+                <div className="feedback-card">
+                  <div className="feedback-header">
+                    {feedback.icon}
+                    <h3 style={{ margin: 0, color: feedback.color }}>{feedback.title}</h3>
+                  </div>
+                  {feedback.percentage && (
+                    <div className="feedback-pct" style={{ color: feedback.color }}>
+                      Confidence Score: {feedback.percentage}%
+                    </div>
+                  )}
+                  <p className="feedback-text">{feedback.text}</p>
+                  
+                  <div className={`status-banner ${result.is_good ? 'status-good' : 'status-bad'}`} style={{ marginTop: '1.5rem' }}>
+                    {result.is_good ? '✔' : '✘'} {result.label}
+                  </div>
 
-          {result && (
-            <div className={`status-banner ${result.is_good ? 'status-good' : 'status-bad'}`}>
-              {result.is_good ? '✔' : '✘'} {result.label}
+                  <button 
+                    className="btn" 
+                    style={{ marginTop: '1.5rem', width: '100%', justifyContent: 'center' }} 
+                    onClick={() => { setResult(null); setSelectedFile(null); setPreviewUrl(null); }}
+                  >
+                    Analyze New Image
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>

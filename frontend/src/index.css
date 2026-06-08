@@ -182,6 +182,27 @@ p {
   display: block;
 }
 
+/* Square Preview Wrapper */
+.preview-container-square {
+  margin-top: 1.5rem;
+  border-radius: 1rem;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  position: relative;
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  background-color: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-container-square img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 /* Animations */
 @keyframes slideUp {
   from {
@@ -279,4 +300,58 @@ p {
   font-weight: 600;
   margin-top: 1rem;
   animation: slideUp 0.3s ease, pulse 2s infinite;
+}
+
+/* Two-column Image Analysis Layout */
+.image-analysis-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  align-items: start;
+  margin-top: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .image-analysis-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.analysis-left {
+  width: 100%;
+}
+
+.analysis-right {
+  width: 100%;
+}
+
+.feedback-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 1.25rem;
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.feedback-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.feedback-pct {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+}
+
+.feedback-text {
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--text-main);
+  margin: 0;
 }

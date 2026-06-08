@@ -6,13 +6,18 @@ import io
 import base64
 import tempfile
 import uuid
+import time
 from fastapi import FastAPI, File, UploadFile, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 import uvicorn
 import asyncio
 from ultralytics import YOLO
+import logging
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] %(message)s')
+logger = logging.getLogger("PostureAPI")
 
 app = FastAPI(title="Posture Detection API")
 
@@ -25,7 +30,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure temp directory for videos exists
 os.makedirs("temp_videos", exist_ok=True)
 app.mount("/videos", StaticFiles(directory="temp_videos"), name="videos")
 
@@ -35,12 +39,13 @@ model = None
 
 try:
     if os.path.exists(MODEL_PATH):
+        logger.info(f"Loading YOLO model from {MODEL_PATH}...")
         model = YOLO(MODEL_PATH)
-        print("✅ Model loaded successfully")
+        logger.info("✅ Model loaded successfully")
     else:
-        print(f"⚠️ Model file not found at {MODEL_PATH}")
+        logger.error(f"⚠️ Model file not found at {MODEL_PATH}")
 except Exception as e:
-    print(f"Error loading model: {e}")
+    logger.exception(f"Error loading model: {e}")
 
 def predict_and_annotate(frame_bgr, conf=0.5):
     if model is None:
@@ -68,17 +73,80 @@ def predict_and_annotate(frame_bgr, conf=0.5):
 
     return annotated, label_text, color
 
+def process_video_file(tmp_path, output_path, conf_threshold):
+    logger.info(f"[Video Process] Starting processing of {tmp_path}")
+    
+    # Use FFMPEG backend to avoid MSMF deadlocks on Windows
+    cap = cv2.VideoCapture(tmp_path, cv2.CAP_FFMPEG)
+    if not cap.isOpened():
+        logger.error(f"[Video Process] Failed to open video file {tmp_path}")
+        return
+        
+    logger.info("[Video Process] Video file opened successfully.")
+    
+    # Switch video input decoding to MJPEG-compatible format
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    logger.info(f"[Video Process] Source video: {width}x{height} @ {fps}fps, Total Frames: {total_frames}")
+    
+    # Use mp4v (built into OpenCV) to avoid OpenH264 dependency errors on Windows
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    
+    if not out.isOpened():
+        logger.error(f"[Video Process] Failed to initialize VideoWriter for {output_path}")
+        cap.release()
+        return
+
+    # Process ~4 frames/sec to keep processing fast (just like the original Streamlit app)
+    step = max(1, int(fps // 4))
+    
+    frames_processed = 0
+    frame_idx = 0
+    start_time = time.time()
+    last_annotated_bgr = None
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            logger.info(f"[Video Process] End of video stream reached after {frames_processed} frames.")
+            break
+            
+        frame_idx += 1
+        
+        # Only run YOLO on every Nth frame
+        if frame_idx % step == 0 or last_annotated_bgr is None:
+            annotated_bgr, _, _ = predict_and_annotate(frame, conf=conf_threshold)
+            last_annotated_bgr = annotated_bgr
+            
+        # Write the most recently annotated frame (this keeps the video playback smooth)
+        out.write(last_annotated_bgr)
+        frames_processed += 1
+        
+        if frames_processed % 50 == 0:
+            logger.info(f"[Video Process] Processed {frames_processed}/{total_frames} frames...")
+            
+    cap.release()
+    out.release()
+    elapsed = time.time() - start_time
+    logger.info(f"[Video Process] Processing completed. Saved to {output_path} in {elapsed:.2f}s")
+
 @app.post("/api/predict/image")
 async def predict_image(file: UploadFile = File(...), conf_threshold: float = Form(0.5)):
+    logger.info(f"[Image Upload] Received image file: {file.filename}")
     contents = await file.read()
     img = Image.open(io.BytesIO(contents)).convert("RGB")
     frame_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
     
-    annotated_bgr, label, color = predict_and_annotate(frame_bgr, conf=conf_threshold)
+    annotated_bgr, label, color = await asyncio.to_thread(predict_and_annotate, frame_bgr, conf_threshold)
     
-    # Encode to base64
     _, buffer = cv2.imencode('.jpg', annotated_bgr)
     img_base64 = base64.b64encode(buffer).decode('utf-8')
+    logger.info(f"[Image Upload] Analyzed image: {label}")
     
     return {
         "image": f"data:image/jpeg;base64,{img_base64}",
@@ -88,55 +156,53 @@ async def predict_image(file: UploadFile = File(...), conf_threshold: float = Fo
 
 @app.post("/api/predict/video")
 async def predict_video(file: UploadFile = File(...), conf_threshold: float = Form(0.5)):
-    # Save uploaded video
+    logger.info(f"[Video Upload] Received video file: {file.filename}")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         contents = await file.read()
         tmp.write(contents)
         tmp_path = tmp.name
-
-    cap = cv2.VideoCapture(tmp_path)
     
-    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    
-    output_filename = f"{uuid.uuid4().hex}.webm"
+    output_filename = f"{uuid.uuid4().hex}.mp4"
     output_path = os.path.join("temp_videos", output_filename)
+    logger.info(f"[Video Upload] Saved temp video to {tmp_path}. Will output to {output_path}")
     
-    # Use VP8/VP9 for better web compatibility without licensing issues usually tied to H264 on OpenCV
-    fourcc = cv2.VideoWriter_fourcc(*'vp09')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    try:
+        await asyncio.to_thread(process_video_file, tmp_path, output_path, conf_threshold)
+    except Exception as e:
+        logger.exception("[Video Upload] Error during process_video_file execution")
+        raise e
+    finally:
+        try:
+            os.unlink(tmp_path)
+            logger.info(f"[Video Upload] Deleted temporary file {tmp_path}")
+        except Exception as e:
+            logger.warning(f"[Video Upload] Could not delete tmp file {tmp_path}: {e}")
     
-    # To prevent extremely long processing, we might optionally skip frames
-    # but for quality we process them all
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-            
-        annotated_bgr, _, _ = predict_and_annotate(frame, conf=conf_threshold)
-        out.write(annotated_bgr)
-        
-    cap.release()
-    out.release()
-    os.unlink(tmp_path)
-    
-    return {"video_url": f"http://localhost:8000/videos/{output_filename}"}
+    url = f"http://127.0.0.1:8000/videos/{output_filename}"
+    logger.info(f"[Video Upload] Returning processed video URL: {url}")
+    return {"video_url": url}
 
 @app.websocket("/api/stream")
 async def websocket_stream(websocket: WebSocket):
     await websocket.accept()
+    client = websocket.client
+    logger.info(f"[Webcam] New WebSocket connection from {client}")
     try:
+        frame_idx = 0
         while True:
             data = await websocket.receive_text()
-            # Expecting base64 image data: "data:image/jpeg;base64,..."
             if data.startswith("data:image"):
                 header, encoded = data.split(",", 1)
                 img_bytes = base64.b64decode(encoded)
                 nparr = np.frombuffer(img_bytes, np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
-                annotated_bgr, label, color = predict_and_annotate(frame, conf=0.5)
+                if frame is None:
+                    logger.warning("[Webcam] Failed to decode received frame bytes into an image.")
+                    continue
+
+                # Offload inference
+                annotated_bgr, label, color = await asyncio.to_thread(predict_and_annotate, frame, 0.5)
                 
                 _, buffer = cv2.imencode('.jpg', annotated_bgr)
                 out_base64 = base64.b64encode(buffer).decode('utf-8')
@@ -146,8 +212,13 @@ async def websocket_stream(websocket: WebSocket):
                     "label": label,
                     "is_good": "Good" in label
                 })
+                frame_idx += 1
+                if frame_idx % 100 == 0:
+                    logger.info(f"[Webcam] Processed {frame_idx} frames for client {client}")
     except WebSocketDisconnect:
-        print("Client disconnected")
+        logger.info(f"[Webcam] Client {client} disconnected normally.")
+    except Exception as e:
+        logger.exception(f"[Webcam] Error in websocket connection with {client}: {e}")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
