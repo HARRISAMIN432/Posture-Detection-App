@@ -1,0 +1,13 @@
+names:
+- '0'
+- '1'
+nc: 2
+roboflow:
+  license: CC BY 4.0
+  project: sitting-posture-v2
+  url: https://universe.roboflow.com/min-bnvzi/sitting-posture-v2/dataset/4
+  version: 4
+  workspace: min-bnvzi
+test: ../test/images
+train: ../train/images
+val: ../valid/images
