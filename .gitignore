@@ -1,2 +1,12 @@
 temp_videos/
 __pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+node_modules/
+.DS_Store
+*.local
+.env
+.env.*
+.venv/

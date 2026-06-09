@@ -90,6 +90,59 @@ def _lm_xy(landmarks, idx, w, h):
     return int(lm.x * w), int(lm.y * h)
 
 
+def _box_iou(a, b):
+    """Intersection-over-union for (x1, y1, x2, y2) boxes."""
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    return inter / (area_a + area_b - inter)
+
+
+def _box_containment(inner, outer):
+    """Fraction of the inner box covered by the outer box."""
+    ix1, iy1 = max(inner[0], outer[0]), max(inner[1], outer[1])
+    ix2, iy2 = min(inner[2], outer[2]), min(inner[3], outer[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    inner_area = (inner[2] - inner[0]) * (inner[3] - inner[1])
+    return inter / inner_area if inner_area else 0.0
+
+
+def _dedupe_detections(detections):
+    """
+    Remove duplicate/overlapping boxes for the same person.
+    YOLO NMS is per-class, so one person can get both Good and Bad boxes.
+    Keeps the highest-confidence box when regions overlap significantly.
+    """
+    ranked = sorted(detections, key=lambda d: d["confidence"], reverse=True)
+    kept = []
+    for det in ranked:
+        box = det["box"]
+        cls = det["cls"]
+        suppress = False
+        for kept_det in kept:
+            kept_box = kept_det["box"]
+            overlap = _box_iou(box, kept_box)
+            if overlap >= 0.65:
+                suppress = True
+                break
+            if (
+                _box_containment(box, kept_box) >= 0.9
+                or _box_containment(kept_box, box) >= 0.9
+            ):
+                suppress = True
+                break
+            if cls != kept_det["cls"] and overlap >= 0.45:
+                suppress = True
+                break
+        if not suppress:
+            kept.append(det)
+    return kept
+
+
 def run_mediapipe(frame_bgr, x1, y1, x2, y2):
     """
     Run MediaPipe Pose on the detected person crop.
@@ -197,12 +250,22 @@ def predict_and_annotate(frame_bgr, conf=0.5):
     if not results.boxes or len(results.boxes) == 0:
         return annotated, "No detection", False, []
 
+    raw_detections = []
+    for box in results.boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        raw_detections.append({
+            "cls":        int(box.cls),
+            "confidence": float(box.conf),
+            "box":        (x1, y1, x2, y2),
+        })
+
+    detections = _dedupe_detections(raw_detections)
     metrics_list = []
 
-    for box in results.boxes:
-        cls        = int(box.cls)
-        confidence = float(box.conf)
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
+    for det in detections:
+        cls        = det["cls"]
+        confidence = det["confidence"]
+        x1, y1, x2, y2 = det["box"]
 
         is_good    = cls == 1
         label_text = f"{'Good' if is_good else 'Bad'} ({confidence:.0%})"
@@ -238,10 +301,19 @@ def predict_and_annotate(frame_bgr, conf=0.5):
         })
 
     # ── Summary label (worst-case logic: any bad = bad) ────────────────────
-    any_bad  = any(not m["is_good"] for m in metrics_list)
-    n        = len(metrics_list)
-    summary  = f"{'Bad' if any_bad else 'Good'} Posture — {n} person{'s' if n>1 else ''} detected"
-    is_good  = not any_bad
+    n_total = len(metrics_list)
+    n_bad   = sum(1 for m in metrics_list if not m["is_good"])
+    n_good  = n_total - n_bad
+
+    if n_bad > 0:
+        if n_bad == n_total:
+            summary = f"Bad Posture — {n_bad} person{'s' if n_bad > 1 else ''} detected"
+        else:
+            summary = f"Bad Posture — {n_bad} of {n_total} person{'s' if n_total > 1 else ''} detected"
+        is_good = False
+    else:
+        summary = f"Good Posture — {n_good} person{'s' if n_good > 1 else ''} detected"
+        is_good = True
 
     return annotated, summary, is_good, metrics_list
 
@@ -330,7 +402,7 @@ def process_video_file(tmp_path, output_path, conf_threshold):
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.post("/api/predict/image")
-async def predict_image(file: UploadFile = File(...), conf_threshold: float = Form(0.5)):
+async def predict_image(file: UploadFile = File(...), conf_threshold: float = Form(0.35)):
     logger.info(f"[Image] {file.filename}")
     contents   = await file.read()
     img        = Image.open(io.BytesIO(contents)).convert("RGB")
@@ -358,7 +430,7 @@ async def predict_image(file: UploadFile = File(...), conf_threshold: float = Fo
 
 
 @app.post("/api/predict/video")
-async def predict_video(file: UploadFile = File(...), conf_threshold: float = Form(0.5)):
+async def predict_video(file: UploadFile = File(...), conf_threshold: float = Form(0.35)):
     logger.info(f"[Video] {file.filename}")
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         contents = await file.read()
@@ -408,7 +480,7 @@ async def websocket_stream(websocket: WebSocket):
                     continue
 
                 annotated, label, is_good, metrics = await asyncio.to_thread(
-                    predict_and_annotate, frame, 0.5
+                    predict_and_annotate, frame, 0.35
                 )
 
                 _, buffer = cv2.imencode('.jpg', annotated)

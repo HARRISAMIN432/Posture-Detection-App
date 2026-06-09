@@ -78,7 +78,7 @@ export default function ImageProcessor() {
 
     const formData = new FormData();
     formData.append("file", selectedFile);
-    formData.append("conf_threshold", "0.5");
+    formData.append("conf_threshold", "0.35");
 
     try {
       const response = await fetch("http://localhost:8000/api/predict/image", {
